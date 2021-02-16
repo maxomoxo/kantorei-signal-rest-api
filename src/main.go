@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"os"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -19,7 +20,7 @@ import (
 // @description This is the Signal Cli REST API documentation.
 
 // @tag.name General
-// @tag.description List general information.
+// @tag.description Some general endpoints.
 
 // @tag.name Devices
 // @tag.description Register and link Devices.
@@ -30,32 +31,55 @@ import (
 // @tag.name Messages
 // @tag.description Send and Receive Signal Messages.
 
+// @tag.name Attachments 
+// @tag.description List and Delete Attachments.
+
+// @tag.name Profiles 
+// @tag.description Update Profile.
+
+// @tag.name Identities
+// @tag.description List and Trust Identities.
+
 // @host 127.0.0.1:8080
-// @BasePath 
+// @BasePath /
 func main() {
-    
-	
 	signalCliConfig := flag.String("signal-cli-config", "/home/.local/share/signal-cli/", "Config directory where signal-cli config is stored")
 	attachmentTmpDir := flag.String("attachment-tmp-dir", "/tmp/", "Attachment tmp directory")
+	avatarTmpDir := flag.String("avatar-tmp-dir", "/tmp/", "Avatar tmp directory")
 	flag.Parse()
 
-	router := gin.Default()
-	
+	router := gin.New()
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "HEAD", "OPTIONS", "POST", "PUT"},
 		AllowHeaders:     []string{"Access-Control-Allow-Headers", "Origin,Accept", "X-Requested-With", "Content-Type", "Access-Control-Request-Method", "Access-Control-Request-Headers", "authorization"},
 		AllowCredentials: true,	
 	}))
-	
+	router.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		SkipPaths: []string{"/v1/health"}, //do not log the health requests (to avoid spamming the log file)
+	}))
+
+	router.Use(gin.Recovery())
+
 	log.Info("Started Signal Messenger REST API")
 
-	api := api.NewApi(*signalCliConfig, *attachmentTmpDir)	
+	api := api.NewApi(*signalCliConfig, *attachmentTmpDir, *avatarTmpDir)
 	v1 := router.Group("/v1")
 	{
 		about := v1.Group("/about")
 		{
 			about.GET("", api.About)
+		}
+
+		configuration := v1.Group("/configuration")
+		{
+			configuration.GET("", api.GetConfiguration)
+			configuration.POST("", api.SetConfiguration)
+		}
+
+		health := v1.Group("/health")
+		{
+			health.GET("", api.Health)
 		}
 
 		register := v1.Group("/register")
@@ -78,12 +102,34 @@ func main() {
 		{
 			groups.POST(":number", api.CreateGroup)
 			groups.GET(":number", api.GetGroups)
+			groups.GET(":number/:groupid", api.GetGroup)
 			groups.DELETE(":number/:groupid", api.DeleteGroup)
+			groups.POST(":number/:groupid/block", api.BlockGroup)
+			groups.POST(":number/:groupid/join", api.JoinGroup)
+			groups.POST(":number/:groupid/quit", api.QuitGroup)
 		}
 
 		link := v1.Group("qrcodelink")
 		{
 			link.GET("", api.GetQrCodeLink)
+		}
+
+		attachments := v1.Group("attachments")
+		{
+			attachments.GET("", api.GetAttachments)
+			attachments.DELETE(":attachment", api.RemoveAttachment)
+			attachments.GET(":attachment", api.ServeAttachment)
+		}
+
+		profiles := v1.Group("profiles")
+		{
+			profiles.PUT(":number", api.UpdateProfile)
+		}
+
+		identities := v1.Group("identities")
+		{
+			identities.GET(":number", api.ListIdentities)
+			identities.PUT(":number/trust/:numbertotrust", api.TrustIdentity)
 		}
 	}
 
@@ -95,11 +141,17 @@ func main() {
 		}
 	}
 
-	swaggerUrl := ginSwagger.URL("http://127.0.0.1:8080/swagger/doc.json")
+	swaggerPort := getEnv("PORT", "8080")
+
+	swaggerUrl := ginSwagger.URL("http://127.0.0.1:" + string(swaggerPort) + "/swagger/doc.json")
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, swaggerUrl))
-	
-	
+
 	router.Run()
+}
 
-
+func getEnv(key string, defaultVal string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultVal
 }

@@ -19,7 +19,6 @@ var doc = `{
         "description": "{{.Description}}",
         "title": "{{.Title}}",
         "contact": {},
-        "license": {},
         "version": "{{.Version}}"
     },
     "host": "{{.Host}}",
@@ -40,6 +39,170 @@ var doc = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/api.About"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/attachments": {
+            "get": {
+                "description": "List all downloaded attachments",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Attachments"
+                ],
+                "summary": "List all attachments.",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/attachments/{attachment}": {
+            "get": {
+                "description": "Serve the attachment with the given id",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Attachments"
+                ],
+                "summary": "Serve Attachment.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Attachment ID",
+                        "name": "attachment",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Remove the attachment with the given id from filesystem.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Attachments"
+                ],
+                "summary": "Remove attachment.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Attachment ID",
+                        "name": "attachment",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/configuration": {
+            "get": {
+                "description": "List the REST API configuration.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "General"
+                ],
+                "summary": "List the REST API configuration.",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.Configuration"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Set the REST API configuration.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "General"
+                ],
+                "summary": "Set the REST API configuration.",
+                "parameters": [
+                    {
+                        "description": "Configuration",
+                        "name": "data",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.Configuration"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
                         }
                     }
                 }
@@ -123,8 +286,51 @@ var doc = `{
             }
         },
         "/v1/groups/{number}/{groupid}": {
+            "get": {
+                "description": "List a specific Signal Group.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Groups"
+                ],
+                "summary": "List a Signal Group.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Group ID",
+                        "name": "groupid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.GroupEntry"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            },
             "delete": {
-                "description": "Delete a Signal Group.",
+                "description": "Delete the specified Signal Group.",
                 "consumes": [
                     "application/json"
                 ],
@@ -167,9 +373,285 @@ var doc = `{
                 }
             }
         },
+        "/v1/groups/{number}/{groupid}/block": {
+            "post": {
+                "description": "Block the specified Signal Group.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Groups"
+                ],
+                "summary": "Block a Signal Group.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Group ID",
+                        "name": "groupid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/groups/{number}/{groupid}/join": {
+            "post": {
+                "description": "Join the specified Signal Group.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Groups"
+                ],
+                "summary": "Join a Signal Group.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Group ID",
+                        "name": "groupid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/groups/{number}/{groupid}/quit": {
+            "post": {
+                "description": "Quit the specified Signal Group.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Groups"
+                ],
+                "summary": "Quit a Signal Group.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Group ID",
+                        "name": "groupid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/health": {
+            "get": {
+                "description": "Internally used by the docker container to perform the health check.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "General"
+                ],
+                "summary": "API Health Check",
+                "responses": {
+                    "204": {
+                        "description": "No Content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/identities/{number}": {
+            "get": {
+                "description": "List all identities for the given number.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Identities"
+                ],
+                "summary": "List Identities",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.IdentityEntry"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/identities/{number}/trust/{numberToTrust}": {
+            "put": {
+                "description": "Trust an identity.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Identities"
+                ],
+                "summary": "Trust Identity",
+                "parameters": [
+                    {
+                        "description": "Input Data",
+                        "name": "data",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TrustIdentityRequest"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Number To Trust",
+                        "name": "numberToTrust",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/profiles/{number}": {
+            "put": {
+                "description": "Set your name and optional an avatar.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Profiles"
+                ],
+                "summary": "Update Profile.",
+                "parameters": [
+                    {
+                        "description": "Profile Data",
+                        "name": "data",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.UpdateProfileRequest"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Registered Phone Number",
+                        "name": "number",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/qrcodelink": {
             "get": {
-                "description": "test",
+                "description": "Link device and generate QR code",
                 "produces": [
                     "application/json"
                 ],
@@ -260,10 +742,20 @@ var doc = `{
                         "name": "number",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "description": "Additional Settings",
+                        "name": "data",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/api.RegisterNumberRequest"
+                        }
                     }
                 ],
                 "responses": {
-                    "201": {},
+                    "201": {
+                        "description": ""
+                    },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
@@ -298,7 +790,6 @@ var doc = `{
                         "description": "Additional Settings",
                         "name": "data",
                         "in": "body",
-                        "required": true,
                         "schema": {
                             "$ref": "#/definitions/api.VerifyNumberSettings"
                         }
@@ -424,6 +915,14 @@ var doc = `{
                 }
             }
         },
+        "api.Configuration": {
+            "type": "object",
+            "properties": {
+                "logging": {
+                    "$ref": "#/definitions/api.LoggingConfiguration"
+                }
+            }
+        },
         "api.CreateGroup": {
             "type": "object",
             "properties": {
@@ -443,9 +942,6 @@ var doc = `{
         "api.GroupEntry": {
             "type": "object",
             "properties": {
-                "active": {
-                    "type": "boolean"
-                },
                 "blocked": {
                     "type": "boolean"
                 },
@@ -453,6 +949,9 @@ var doc = `{
                     "type": "string"
                 },
                 "internal_id": {
+                    "type": "string"
+                },
+                "invite_link": {
                     "type": "string"
                 },
                 "members": {
@@ -463,6 +962,57 @@ var doc = `{
                 },
                 "name": {
                     "type": "string"
+                },
+                "pending_invites": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "pending_requests": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "api.IdentityEntry": {
+            "type": "object",
+            "properties": {
+                "added": {
+                    "type": "string"
+                },
+                "fingerprint": {
+                    "type": "string"
+                },
+                "number": {
+                    "type": "string"
+                },
+                "safety_number": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.LoggingConfiguration": {
+            "type": "object",
+            "properties": {
+                "Level": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.RegisterNumberRequest": {
+            "type": "object",
+            "properties": {
+                "captcha": {
+                    "type": "string"
+                },
+                "use_voice": {
+                    "type": "boolean"
                 }
             }
         },
@@ -512,6 +1062,25 @@ var doc = `{
                 }
             }
         },
+        "api.TrustIdentityRequest": {
+            "type": "object",
+            "properties": {
+                "verified_safety_number": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.UpdateProfileRequest": {
+            "type": "object",
+            "properties": {
+                "base64_avatar": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
         "api.VerifyNumberSettings": {
             "type": "object",
             "properties": {
@@ -523,7 +1092,7 @@ var doc = `{
     },
     "tags": [
         {
-            "description": "List general information.",
+            "description": "Some general endpoints.",
             "name": "General"
         },
         {
@@ -537,6 +1106,18 @@ var doc = `{
         {
             "description": "Send and Receive Signal Messages.",
             "name": "Messages"
+        },
+        {
+            "description": "List and Delete Attachments.",
+            "name": "Attachments"
+        },
+        {
+            "description": "Update Profile.",
+            "name": "Profiles"
+        },
+        {
+            "description": "List and Trust Identities.",
+            "name": "Identities"
         }
     ]
 }`

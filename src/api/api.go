@@ -6,11 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cyphar/filepath-securejoin"
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/gin-gonic/gin"
 	uuid "github.com/gofrs/uuid"
 	"github.com/h2non/filetype"
@@ -18,19 +24,51 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
+const signalCliV2GroupError = "Cannot create a V2 group as self does not have a versioned profile"
+
 const groupPrefix = "group."
 
 type GroupEntry struct {
-	Name       string   `json:"name"`
-	Id         string   `json:"id"`
-	InternalId string   `json:"internal_id"`
-	Members    []string `json:"members"`
-	Active     bool     `json:"active"`
-	Blocked    bool     `json:"blocked"`
+	Name            string   `json:"name"`
+	Id              string   `json:"id"`
+	InternalId      string   `json:"internal_id"`
+	Members         []string `json:"members"`
+	Blocked         bool     `json:"blocked"`
+	PendingInvites  []string `json:"pending_invites"`
+	PendingRequests []string `json:"pending_requests"`
+	InviteLink      string   `json:"invite_link"`
+}
+
+type LoggingConfiguration struct {
+	Level            string   `json:"Level"`
+}
+
+type Configuration struct {
+	Logging            LoggingConfiguration   `json:"logging"`
+}
+
+type SignalCliGroupEntry struct {
+	Name              string   `json:"name"`
+	Id                string   `json:"id"`
+	IsMember          bool     `json:"isMember"`
+	IsBlocked         bool     `json:"isBlocked"`
+	Members           []string `json:"members"`
+	PendingMembers    []string `json:"pendingMembers"`
+	RequestingMembers []string `json:"requestingMembers"`
+	GroupInviteLink   string   `json:"groupInviteLink"`
+}
+
+type IdentityEntry struct {
+	Number       string `json:"number"`
+	Status       string `json:"status"`
+	Fingerprint  string `json:"fingerprint"`
+	Added        string `json:"added"`
+	SafetyNumber string `json:"safety_number"`
 }
 
 type RegisterNumberRequest struct {
-	UseVoice bool `json:"use_voice"`
+	UseVoice bool   `json:"use_voice"`
+	Captcha  string `json:"captcha"`
 }
 
 type VerifyNumberSettings struct {
@@ -65,8 +103,27 @@ type CreateGroup struct {
 	Id string `json:"id"`
 }
 
+type UpdateProfileRequest struct {
+	Name         string `json:"name"`
+	Base64Avatar string `json:"base64_avatar"`
+}
+
+type TrustIdentityRequest struct {
+	VerifiedSafetyNumber string `json:"verified_safety_number"`
+}
+
 func convertInternalGroupIdToGroupId(internalId string) string {
 	return groupPrefix + base64.StdEncoding.EncodeToString([]byte(internalId))
+}
+
+func convertGroupIdToInternalGroupId(id string) (string, error) {
+	groupIdWithoutPrefix := strings.TrimPrefix(id, groupPrefix)
+	internalGroupId, err := base64.StdEncoding.DecodeString(groupIdWithoutPrefix)
+	if err != nil {
+		return "", errors.New("Invalid group id")
+	}
+
+	return string(internalGroupId), err
 }
 
 func getStringInBetween(str string, start string, end string) (result string) {
@@ -88,9 +145,22 @@ func cleanupTmpFiles(paths []string) {
 	}
 }
 
+func getContainerId() (string, error) {
+	data, err := ioutil.ReadFile("/proc/1/cpuset")
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return "", errors.New("Couldn't get docker container id (empty)")
+	}
+	containerId := strings.Replace(lines[0], "/docker/", "", -1)
+	return containerId, nil
+}
+
 func send(c *gin.Context, attachmentTmpDir string, signalCliConfig string, number string, message string,
 	recipients []string, base64Attachments []string, isGroup bool) {
-	cmd := []string{"--config", signalCliConfig, "-u", number, "send", "-m", message}
+	cmd := []string{"--config", signalCliConfig, "-u", number, "send"}
 
 	if len(recipients) == 0 {
 		c.JSON(400, gin.H{"error": "Please specify at least one recipient"})
@@ -163,70 +233,76 @@ func send(c *gin.Context, attachmentTmpDir string, signalCliConfig string, numbe
 		cmd = append(cmd, attachmentTmpPaths...)
 	}
 
-	_, err := runSignalCli(true, cmd)
+	_, err := runSignalCli(true, cmd, message)
 	if err != nil {
 		cleanupTmpFiles(attachmentTmpPaths)
-		c.JSON(400, gin.H{"error": err.Error()})
+		if strings.Contains(err.Error(), signalCliV2GroupError) {
+			c.JSON(400, Error{Msg: "Cannot send message to group - please first update your profile."})
+		} else {
+			c.JSON(400, Error{Msg: err.Error()})
+		}
 		return
 	}
 
 	cleanupTmpFiles(attachmentTmpPaths)
-	c.JSON(201, nil)
+	c.Writer.WriteHeader(201)
+}
+
+func parseWhitespaceDelimitedKeyValueStringList(in string, keys []string) []map[string]string {
+	l := []map[string]string{}
+	lines := strings.Split(in, "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		m := make(map[string]string)
+
+		temp := line
+		for i, key := range keys {
+			if i == 0 {
+				continue
+			}
+
+			idx := strings.Index(temp, " "+key+": ")
+			pair := temp[:idx]
+			value := strings.TrimPrefix(pair, key+": ")
+			temp = strings.TrimLeft(temp[idx:], " "+key+": ")
+
+			m[keys[i-1]] = value
+		}
+		m[keys[len(keys)-1]] = temp
+
+		l = append(l, m)
+	}
+	return l
 }
 
 func getGroups(number string, signalCliConfig string) ([]GroupEntry, error) {
 	groupEntries := []GroupEntry{}
 
-	out, err := runSignalCli(true, []string{"--config", signalCliConfig, "-u", number, "listGroups", "-d"})
+	out, err := runSignalCli(true, []string{"--config", signalCliConfig, "--output", "json", "-u", number, "listGroups", "-d"}, "")
 	if err != nil {
 		return groupEntries, err
 	}
 
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
+	var signalCliGroupEntries []SignalCliGroupEntry
+
+	err = json.Unmarshal([]byte(out), &signalCliGroupEntries)
+	if err != nil {
+		return groupEntries, err
+	}
+
+	for _, signalCliGroupEntry := range signalCliGroupEntries {
 		var groupEntry GroupEntry
-		if line == "" {
-			continue
-		}
-
-		idIdx := strings.Index(line, " Name: ")
-		idPair := line[:idIdx]
-		groupEntry.InternalId = strings.TrimPrefix(idPair, "Id: ")
-		groupEntry.Id = convertInternalGroupIdToGroupId(groupEntry.InternalId)
-		lineWithoutId := strings.TrimLeft(line[idIdx:], " ")
-
-		nameIdx := strings.Index(lineWithoutId, " Active: ")
-		namePair := lineWithoutId[:nameIdx]
-		groupEntry.Name = strings.TrimRight(strings.TrimPrefix(namePair, "Name: "), " ")
-		lineWithoutName := strings.TrimLeft(lineWithoutId[nameIdx:], " ")
-
-		activeIdx := strings.Index(lineWithoutName, " Blocked: ")
-		activePair := lineWithoutName[:activeIdx]
-		active := strings.TrimPrefix(activePair, "Active: ")
-		if active == "true" {
-			groupEntry.Active = true
-		} else {
-			groupEntry.Active = false
-		}
-		lineWithoutActive := strings.TrimLeft(lineWithoutName[activeIdx:], " ")
-
-		blockedIdx := strings.Index(lineWithoutActive, " Members: ")
-		blockedPair := lineWithoutActive[:blockedIdx]
-		blocked := strings.TrimPrefix(blockedPair, "Blocked: ")
-		if blocked == "true" {
-			groupEntry.Blocked = true
-		} else {
-			groupEntry.Blocked = false
-		}
-		lineWithoutBlocked := strings.TrimLeft(lineWithoutActive[blockedIdx:], " ")
-
-		membersPair := lineWithoutBlocked
-		members := strings.TrimPrefix(membersPair, "Members: ")
-		trimmedMembers := strings.TrimRight(strings.TrimLeft(members, "["), "]")
-		trimmedMembersList := strings.Split(trimmedMembers, ",")
-		for _, member := range trimmedMembersList {
-			groupEntry.Members = append(groupEntry.Members, strings.Trim(member, " "))
-		}
+		groupEntry.InternalId = signalCliGroupEntry.Id
+		groupEntry.Name = signalCliGroupEntry.Name
+		groupEntry.Id = convertInternalGroupIdToGroupId(signalCliGroupEntry.Id)
+		groupEntry.Blocked = signalCliGroupEntry.IsBlocked
+		groupEntry.Members = signalCliGroupEntry.Members
+		groupEntry.PendingRequests = signalCliGroupEntry.PendingMembers
+		groupEntry.PendingInvites = signalCliGroupEntry.RequestingMembers
+		groupEntry.InviteLink = signalCliGroupEntry.GroupInviteLink
 
 		groupEntries = append(groupEntries, groupEntry)
 	}
@@ -234,8 +310,22 @@ func getGroups(number string, signalCliConfig string) ([]GroupEntry, error) {
 	return groupEntries, nil
 }
 
-func runSignalCli(wait bool, args []string) (string, error) {
+func runSignalCli(wait bool, args []string, stdin string) (string, error) {
+	containerId, err := getContainerId()
+
+	log.Debug("If you want to run this command manually, run the following steps on your host system:")
+	if err == nil {
+		log.Debug("*) docker exec -it ", containerId, " /bin/bash")
+	} else {
+		log.Debug("*) docker exec -it <container id> /bin/bash")
+	}
+	log.Debug("*) su signal-api")
+	log.Debug("*) signal-cli ", strings.Join(args, " "))
+
 	cmd := exec.Command("signal-cli", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	if wait {
 		var errBuffer bytes.Buffer
 		var outBuffer bytes.Buffer
@@ -263,6 +353,7 @@ func runSignalCli(wait bool, args []string) (string, error) {
 				return "", errors.New(errBuffer.String())
 			}
 		}
+
 		return outBuffer.String(), nil
 	} else {
 		stdout, err := cmd.StdoutPipe()
@@ -279,12 +370,14 @@ func runSignalCli(wait bool, args []string) (string, error) {
 type Api struct {
 	signalCliConfig  string
 	attachmentTmpDir string
+	avatarTmpDir     string
 }
 
-func NewApi(signalCliConfig string, attachmentTmpDir string) *Api {
+func NewApi(signalCliConfig string, attachmentTmpDir string, avatarTmpDir string) *Api {
 	return &Api{
 		signalCliConfig:  signalCliConfig,
 		attachmentTmpDir: attachmentTmpDir,
+		avatarTmpDir:     avatarTmpDir,
 	}
 }
 
@@ -308,6 +401,7 @@ func (a *Api) About(c *gin.Context) {
 // @Success 201
 // @Failure 400 {object} Error
 // @Param number path string true "Registered Phone Number"
+// @Param data body RegisterNumberRequest false "Additional Settings"
 // @Router /v1/register/{number} [post]
 func (a *Api) RegisterNumber(c *gin.Context) {
 	number := c.Param("number")
@@ -325,6 +419,7 @@ func (a *Api) RegisterNumber(c *gin.Context) {
 		}
 	} else {
 		req.UseVoice = false
+		req.Captcha = ""
 	}
 
 	if number == "" {
@@ -338,12 +433,16 @@ func (a *Api) RegisterNumber(c *gin.Context) {
 		command = append(command, "--voice")
 	}
 
-	_, err := runSignalCli(true, command)
+	if req.Captcha != "" {
+		command = append(command, []string{"--captcha", req.Captcha}...)
+	}
+
+	_, err := runSignalCli(true, command, "")
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(201, nil)
+	c.Writer.WriteHeader(201)
 }
 
 // @Summary Verify a registered phone number.
@@ -354,7 +453,7 @@ func (a *Api) RegisterNumber(c *gin.Context) {
 // @Success 201 {string} string "OK"
 // @Failure 400 {object} Error
 // @Param number path string true "Registered Phone Number"
-// @Param data body VerifyNumberSettings true "Additional Settings"
+// @Param data body VerifyNumberSettings false "Additional Settings"
 // @Param token path string true "Verification Code"
 // @Router /v1/register/{number}/verify/{token} [post]
 func (a *Api) VerifyRegisteredNumber(c *gin.Context) {
@@ -391,12 +490,12 @@ func (a *Api) VerifyRegisteredNumber(c *gin.Context) {
 		cmd = append(cmd, pin)
 	}
 
-	_, err := runSignalCli(true, cmd)
+	_, err := runSignalCli(true, cmd, "")
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(201, nil)
+	c.Writer.WriteHeader(201)
 }
 
 // @Summary Send a signal message.
@@ -495,7 +594,7 @@ func (a *Api) Receive(c *gin.Context) {
 	timeout := c.DefaultQuery("timeout", "1")
 
 	command := []string{"--config", a.signalCliConfig, "-u", number, "receive", "-t", timeout, "--json"}
-	out, err := runSignalCli(true, command)
+	out, err := runSignalCli(true, command, "")
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -544,9 +643,13 @@ func (a *Api) CreateGroup(c *gin.Context) {
 	cmd := []string{"--config", a.signalCliConfig, "-u", number, "updateGroup", "-n", req.Name, "-m"}
 	cmd = append(cmd, req.Members...)
 
-	out, err := runSignalCli(true, cmd)
+	out, err := runSignalCli(true, cmd, "")
 	if err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+		if strings.Contains(err.Error(), signalCliV2GroupError) {
+			c.JSON(400, Error{Msg: "Cannot create group - please first update your profile."})
+		} else {
+			c.JSON(400, Error{Msg: err.Error()})
+		}
 		return
 	}
 
@@ -575,9 +678,39 @@ func (a *Api) GetGroups(c *gin.Context) {
 	c.JSON(200, groups)
 }
 
+// @Summary List a Signal Group.
+// @Tags Groups
+// @Description List a specific Signal Group.
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} GroupEntry
+// @Failure 400 {object} Error
+// @Param number path string true "Registered Phone Number"
+// @Param groupid path string true "Group ID"
+// @Router /v1/groups/{number}/{groupid} [get]
+func (a *Api) GetGroup(c *gin.Context) {
+	number := c.Param("number")
+	groupId := c.Param("groupid")
+
+	groups, err := getGroups(number, a.signalCliConfig)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	for _, group := range groups {
+		if group.Id == groupId {
+			c.JSON(200, group)
+			return
+		}
+	}
+
+	c.JSON(404, Error{Msg: "No group with that id found"})
+}
+
 // @Summary Delete a Signal Group.
 // @Tags Groups
-// @Description Delete a Signal Group.
+// @Description Delete the specified Signal Group.
 // @Accept  json
 // @Produce  json
 // @Success 200 {string} string "OK"
@@ -600,7 +733,7 @@ func (a *Api) DeleteGroup(c *gin.Context) {
 		return
 	}
 
-	_, err = runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "quitGroup", "-g", string(groupId)})
+	_, err = runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "quitGroup", "-g", string(groupId)}, "")
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -609,7 +742,7 @@ func (a *Api) DeleteGroup(c *gin.Context) {
 
 // @Summary Link device and generate QR code.
 // @Tags Devices
-// @Description test
+// @Description Link device and generate QR code
 // @Produce  json
 // @Success 200 {string} string	"Image"
 // @Failure 400 {object} Error
@@ -624,7 +757,7 @@ func (a *Api) GetQrCodeLink(c *gin.Context) {
 
 	command := []string{"--config", a.signalCliConfig, "link", "-n", deviceName}
 
-	tsdeviceLink, err := runSignalCli(false, command)
+	tsdeviceLink, err := runSignalCli(false, command, "")
 	if err != nil {
 		log.Error("Couldn't create QR code: ", err.Error())
 		c.JSON(400, Error{Msg: "Couldn't create QR code: " + err.Error()})
@@ -648,4 +781,433 @@ func (a *Api) GetQrCodeLink(c *gin.Context) {
 	}
 
 	c.Data(200, "image/png", png)
+}
+
+// @Summary List all attachments.
+// @Tags Attachments
+// @Description List all downloaded attachments
+// @Produce  json
+// @Success 200 {object} []string
+// @Failure 400 {object} Error
+// @Router /v1/attachments [get]
+func (a *Api) GetAttachments(c *gin.Context) {
+	files := []string{}
+	err := filepath.Walk(a.signalCliConfig+"/attachments/", func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
+		}
+		files = append(files, filepath.Base(path))
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(500, Error{Msg: "Couldn't get list of attachments: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, files)
+}
+
+// @Summary Remove attachment.
+// @Tags Attachments
+// @Description Remove the attachment with the given id from filesystem.
+// @Produce  json
+// @Success 204 {string} OK
+// @Failure 400 {object} Error
+// @Param attachment path string true "Attachment ID"
+// @Router /v1/attachments/{attachment} [delete]
+func (a *Api) RemoveAttachment(c *gin.Context) {
+	attachment := c.Param("attachment")
+	path, err := securejoin.SecureJoin(a.signalCliConfig+"/attachments/", attachment)
+	if err != nil {
+		c.JSON(400, Error{Msg: "Please provide a valid attachment name"})
+		return
+	}
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		c.JSON(404, Error{Msg: "No attachment with that name found"})
+		return
+	}
+	err = os.Remove(path)
+	if err != nil {
+		c.JSON(500, Error{Msg: "Couldn't delete attachment - please try again later"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary Serve Attachment.
+// @Tags Attachments
+// @Description Serve the attachment with the given id
+// @Produce  json
+// @Success 200 {string} OK
+// @Failure 400 {object} Error
+// @Param attachment path string true "Attachment ID"
+// @Router /v1/attachments/{attachment} [get]
+func (a *Api) ServeAttachment(c *gin.Context) {
+	attachment := c.Param("attachment")
+	path, err := securejoin.SecureJoin(a.signalCliConfig+"/attachments/", attachment)
+	if err != nil {
+		c.JSON(400, Error{Msg: "Please provide a valid attachment name"})
+		return
+	}
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		c.JSON(404, Error{Msg: "No attachment with that name found"})
+		return
+	}
+
+	imgBytes, err := ioutil.ReadFile(path)
+	if err != nil {
+		c.JSON(500, Error{Msg: "Couldn't read attachment - please try again later"})
+		return
+	}
+
+	mime, err := mimetype.DetectReader(bytes.NewReader(imgBytes))
+	if err != nil {
+		c.JSON(500, Error{Msg: "Couldn't detect MIME type for attachment"})
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", mime.String())
+	c.Writer.Header().Set("Content-Length", strconv.Itoa(len(imgBytes)))
+	_, err = c.Writer.Write(imgBytes)
+	if err != nil {
+		c.JSON(500, Error{Msg: "Couldn't serve attachment - please try again later"})
+		return
+	}
+}
+
+// @Summary Update Profile.
+// @Tags Profiles
+// @Description Set your name and optional an avatar.
+// @Produce  json
+// @Success 204 {string} OK
+// @Failure 400 {object} Error
+// @Param data body UpdateProfileRequest true "Profile Data"
+// @Param number path string true "Registered Phone Number"
+// @Router /v1/profiles/{number} [put]
+func (a *Api) UpdateProfile(c *gin.Context) {
+	number := c.Param("number")
+
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	var req UpdateProfileRequest
+	err := c.BindJSON(&req)
+	if err != nil {
+		c.JSON(400, Error{Msg: "Couldn't process request - invalid request"})
+		log.Error(err.Error())
+		return
+	}
+
+	if req.Name == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - profile name missing"})
+		return
+	}
+	cmd := []string{"--config", a.signalCliConfig, "-u", number, "updateProfile", "--name", req.Name}
+
+	avatarTmpPaths := []string{}
+	if req.Base64Avatar == "" {
+		cmd = append(cmd, "--remove-avatar")
+	} else {
+		u, err := uuid.NewV4()
+		if err != nil {
+			c.JSON(400, Error{Msg: err.Error()})
+			return
+		}
+
+		avatarBytes, err := base64.StdEncoding.DecodeString(req.Base64Avatar)
+		if err != nil {
+			c.JSON(400, Error{Msg: "Couldn't decode base64 encoded avatar"})
+			return
+		}
+
+		fType, err := filetype.Get(avatarBytes)
+		if err != nil {
+			c.JSON(400, Error{Msg: err.Error()})
+			return
+		}
+
+		avatarTmpPath := a.avatarTmpDir + u.String() + "." + fType.Extension
+
+		f, err := os.Create(avatarTmpPath)
+		if err != nil {
+			c.JSON(400, Error{Msg: err.Error()})
+			return
+		}
+		defer f.Close()
+
+		if _, err := f.Write(avatarBytes); err != nil {
+			cleanupTmpFiles(avatarTmpPaths)
+			c.JSON(400, Error{Msg: err.Error()})
+			return
+		}
+		if err := f.Sync(); err != nil {
+			cleanupTmpFiles(avatarTmpPaths)
+			c.JSON(400, Error{Msg: err.Error()})
+			return
+		}
+		f.Close()
+
+		cmd = append(cmd, []string{"--avatar", avatarTmpPath}...)
+		avatarTmpPaths = append(avatarTmpPaths, avatarTmpPath)
+	}
+
+	_, err = runSignalCli(true, cmd, "")
+	if err != nil {
+		cleanupTmpFiles(avatarTmpPaths)
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+
+	cleanupTmpFiles(avatarTmpPaths)
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary API Health Check
+// @Tags General
+// @Description Internally used by the docker container to perform the health check.
+// @Produce  json
+// @Success 204 {string} OK
+// @Router /v1/health [get]
+func (a *Api) Health(c *gin.Context) {
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary List Identities
+// @Tags Identities
+// @Description List all identities for the given number.
+// @Produce  json
+// @Success 200 {object} []IdentityEntry
+// @Param number path string true "Registered Phone Number"
+// @Router /v1/identities/{number} [get]
+func (a *Api) ListIdentities(c *gin.Context) {
+	number := c.Param("number")
+
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	out, err := runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "listIdentities"}, "")
+	if err != nil {
+		c.JSON(500, Error{Msg: err.Error()})
+		return
+	}
+
+	identityEntries := []IdentityEntry{}
+	keyValuePairs := parseWhitespaceDelimitedKeyValueStringList(out, []string{"NumberAndTrustStatus", "Added", "Fingerprint", "Safety Number"})
+	for _, keyValuePair := range keyValuePairs {
+		numberAndTrustStatus := keyValuePair["NumberAndTrustStatus"]
+		numberAndTrustStatusSplitted := strings.Split(numberAndTrustStatus, ":")
+
+		identityEntry := IdentityEntry{Number: strings.Trim(numberAndTrustStatusSplitted[0], " "),
+			Status:       strings.Trim(numberAndTrustStatusSplitted[1], " "),
+			Added:        keyValuePair["Added"],
+			Fingerprint:  strings.Trim(keyValuePair["Fingerprint"], " "),
+			SafetyNumber: strings.Trim(keyValuePair["Safety Number"], " "),
+		}
+		identityEntries = append(identityEntries, identityEntry)
+	}
+
+	c.JSON(200, identityEntries)
+}
+
+// @Summary Trust Identity
+// @Tags Identities
+// @Description Trust an identity.
+// @Produce  json
+// @Success 204 {string} OK
+// @Param data body TrustIdentityRequest true "Input Data"
+// @Param number path string true "Registered Phone Number"
+// @Param numberToTrust path string true "Number To Trust"
+// @Router /v1/identities/{number}/trust/{numberToTrust} [put]
+func (a *Api) TrustIdentity(c *gin.Context) {
+	number := c.Param("number")
+
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	numberToTrust := c.Param("numbertotrust")
+	if numberToTrust == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number to trust missing"})
+		return
+	}
+
+	var req TrustIdentityRequest
+	err := c.BindJSON(&req)
+	if err != nil {
+		c.JSON(400, Error{Msg: "Couldn't process request - invalid request"})
+		log.Error(err.Error())
+		return
+	}
+
+	if req.VerifiedSafetyNumber == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - verified safety number missing"})
+		return
+	}
+
+	cmd := []string{"--config", a.signalCliConfig, "-u", number, "trust", numberToTrust, "--verified-safety-number", req.VerifiedSafetyNumber}
+	_, err = runSignalCli(true, cmd, "")
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary Set the REST API configuration.
+// @Tags General
+// @Description Set the REST API configuration.
+// @Accept  json
+// @Produce  json
+// @Success 201 {string} string "OK"
+// @Failure 400 {object} Error
+// @Param data body Configuration true "Configuration"
+// @Router /v1/configuration [post]
+func (a *Api) SetConfiguration(c *gin.Context) {
+	var req Configuration
+	err := c.BindJSON(&req)
+	if err != nil {
+		c.JSON(400, Error{Msg: "Couldn't process request - invalid request"})
+		log.Error(err.Error())
+		return
+	}
+
+	if req.Logging.Level != "" {
+		if req.Logging.Level == "debug" {
+			log.SetLevel(log.DebugLevel)
+		} else if req.Logging.Level == "info" {
+			log.SetLevel(log.InfoLevel)
+		} else if req.Logging.Level == "warn" {
+			log.SetLevel(log.WarnLevel)
+		} else {
+			c.JSON(400, Error{Msg: "Couldn't set log level - invalid log level"})
+			return
+		}
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary List the REST API configuration.
+// @Tags General
+// @Description List the REST API configuration.
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} Configuration
+// @Failure 400 {object} Error
+// @Router /v1/configuration [get]
+func (a *Api) GetConfiguration(c *gin.Context) {
+	logLevel := ""
+	if log.GetLevel() == log.DebugLevel {
+		logLevel = "debug"
+	} else if log.GetLevel() == log.InfoLevel {
+		logLevel = "info"
+	} else if log.GetLevel() == log.WarnLevel {
+		logLevel = "warn"
+	}
+
+	configuration := Configuration{Logging: LoggingConfiguration{Level: logLevel}}
+	c.JSON(200, configuration)
+}
+
+// @Summary Block a Signal Group.
+// @Tags Groups
+// @Description Block the specified Signal Group.
+// @Accept  json
+// @Produce  json
+// @Success 200 {string} OK
+// @Failure 400 {object} Error
+// @Param number path string true "Registered Phone Number"
+// @Param groupid path string true "Group ID"
+// @Router /v1/groups/{number}/{groupid}/block [post]
+func (a *Api) BlockGroup(c *gin.Context) {
+	number := c.Param("number")
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	groupId := c.Param("groupid")
+	internalGroupId, err := convertGroupIdToInternalGroupId(groupId)
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+
+	_, err = runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "block", "-g", internalGroupId}, "")
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary Join a Signal Group.
+// @Tags Groups
+// @Description Join the specified Signal Group.
+// @Accept  json
+// @Produce  json
+// @Success 200 {string} OK
+// @Failure 400 {object} Error
+// @Param number path string true "Registered Phone Number"
+// @Param groupid path string true "Group ID"
+// @Router /v1/groups/{number}/{groupid}/join [post]
+func (a *Api) JoinGroup(c *gin.Context) {
+	number := c.Param("number")
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	groupId := c.Param("groupid")
+	internalGroupId, err := convertGroupIdToInternalGroupId(groupId)
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+
+	_, err = runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "updateGroup", "-g", internalGroupId}, "")
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary Quit a Signal Group.
+// @Tags Groups
+// @Description Quit the specified Signal Group.
+// @Accept  json
+// @Produce  json
+// @Success 200 {string} OK
+// @Failure 400 {object} Error
+// @Param number path string true "Registered Phone Number"
+// @Param groupid path string true "Group ID"
+// @Router /v1/groups/{number}/{groupid}/quit [post]
+func (a *Api) QuitGroup(c *gin.Context) {
+	number := c.Param("number")
+	if number == "" {
+		c.JSON(400, Error{Msg: "Couldn't process request - number missing"})
+		return
+	}
+
+	groupId := c.Param("groupid")
+	internalGroupId, err := convertGroupIdToInternalGroupId(groupId)
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+
+	_, err = runSignalCli(true, []string{"--config", a.signalCliConfig, "-u", number, "quitGroup", "-g", internalGroupId}, "")
+	if err != nil {
+		c.JSON(400, Error{Msg: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
