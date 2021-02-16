@@ -1,0 +1,35 @@
+{
+  "username" : "+431212131491291",
+  "uuid" : null,
+  "deviceId" : 1,
+  "isMultiDevice" : false,
+  "password" : null,
+  "registrationLockPin" : null,
+  "signalingKey" : null,
+  "preKeyIdOffset" : 0,
+  "nextSignedPreKeyId" : 0,
+  "profileKey" : "Z+cBIjBkgmgdo6n4fPi6AyNQIAmPOXio9WEVO5nbREc=",
+  "registered" : false,
+  "axolotlStore" : {
+    "preKeys" : [ ],
+    "sessionStore" : [ ],
+    "signedPreKeyStore" : [ ],
+    "identityKeyStore" : {
+      "registrationId" : 9311,
+      "identityKey" : "CiEFS2ISTrRRyQSkMc4oikpdAPtCaZT/eZNfS299/nXtVm4SINhnIkhyrPEJl1fXPQO5k+drDIYWW9bM1Y5SH4BbzZpR",
+      "trustedKeys" : [ ]
+    }
+  },
+  "groupStore" : {
+    "groups" : [ ]
+  },
+  "contactStore" : {
+    "contacts" : [ ]
+  },
+  "recipientStore" : {
+    "recipientStore" : [ ]
+  },
+  "profileStore" : {
+    "profiles" : [ ]
+  }
+}
